@@ -1,5 +1,14 @@
 # `cdshealpix` Change Log
 
+## Unreleased
+
+### Changed
+
+* Replace `bincode`, which is unmaintained (RUSTSEC-2025-0141), with `rmp-serde` for the
+  temporary files written by the HEALPix external sort. The files are internal to a sort
+  run, so no on-disk format compatibility is affected. `SortError::BincodeError` becomes
+  `SortError::EncodeError` and `SortError::DecodeError`.
+
 ## 0.9.0
 
 Released 2026-01-22

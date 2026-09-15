@@ -11,11 +11,6 @@ use std::{
   vec::IntoIter,
 };
 
-use bincode::{
-  self,
-  config::{FixintEncoding, WithOtherIntEncoding},
-  DefaultOptions, Error as BincodeError, Options,
-};
 use log::{debug, error, warn};
 use rayon::{prelude::ParallelSliceMut, ThreadPool}; // iter::ZipEq
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -46,8 +41,10 @@ impl<A: IntSortable + Serialize + DeserializeOwned> ExtSortable for A {}
 pub enum SortError {
   #[error("I/O error")]
   IoError(#[from] IoError),
-  #[error("Serialization/deserialization (bincode) error")]
-  BincodeError(#[from] BincodeError),
+  #[error("Serialization error")]
+  EncodeError(#[from] rmp_serde::encode::Error),
+  #[error("Deserialization error")]
+  DecodeError(#[from] rmp_serde::decode::Error),
   #[error("Sort error: `{0}`.")]
   Custom(String),
 }
@@ -460,8 +457,6 @@ where
   let depth = count_map.depth();
   let dd = 29 - depth;
   let twice_dd = dd << 1;
-  // Config bincode
-  let bincode = get_bincode();
   // Create the temporary directory
   params.create_tmp_dir()?;
   // Init thread pool
@@ -540,7 +535,7 @@ where
         let file = params.create_file_or_open_to_append(depth, range)?;
         let mut bufw = BufWriter::new(file);
         for row in to_be_writen {
-          bincode.serialize_into(&mut bufw, row)?;
+          rmp_serde::encode::write(&mut bufw, row)?;
         }
 
         let to = to as u32;
@@ -627,13 +622,10 @@ where
     let file = File::open(path).map_err(SortError::IoError)?;
     let file_len = file.metadata().map_err(SortError::IoError)?.len();
     let mut bufr = BufReader::new(file);
-    let bincode = get_bincode();
     let mut rows = Vec::with_capacity(nrows);
     for _ in 0..nrows {
       rows.push(
-        bincode
-          .deserialize_from(&mut bufr)
-          .map_err(SortError::BincodeError)?,
+        rmp_serde::decode::from_read(&mut bufr).map_err(SortError::DecodeError)?,
       );
     }
     let pos = bufr.stream_position().map_err(SortError::IoError)?;
@@ -760,12 +752,6 @@ where
     tmp_dir: params.tmp_dir,
     clean: params.clean,
   })
-}
-
-// DefaultOptions
-fn get_bincode() -> WithOtherIntEncoding<DefaultOptions, FixintEncoding> {
-  DefaultOptions::new().with_fixint_encoding()
-  // .allow_trailing_bytes()
 }
 
 /// Method telling if a range is smaller, contains or is greater than the given input hash value.
@@ -904,7 +890,6 @@ where
 {
   let params = sort_params.unwrap_or_default();
   let twice_dd = (29 - depth) << 1;
-  let bincode = get_bincode();
   // Write tmp file containing all rows, and compute the count map
   let count_map = {
     let tmp_file_all = params
@@ -918,7 +903,7 @@ where
         .filter_map(|(irow, row_res)| match row_res {
           Ok(row) => {
             let hash = (hpx29(&row) >> twice_dd) as u32;
-            match bincode.serialize_into(&mut bufw, &row) {
+            match rmp_serde::encode::write(&mut bufw, &row) {
               Ok(()) => Some(hash),
               Err(e) => {
                 error!("Error writing line {}, line ignored: {:?}", irow, e);
@@ -940,7 +925,7 @@ where
   }
   let mut bufr = params.open_file_all().map(BufReader::new)?;
   hpx_external_sort_with_knowledge(
-    (0..n_rows).map(move |_| bincode.deserialize_from(&mut bufr)),
+    (0..n_rows).map(move |_| rmp_serde::decode::from_read(&mut bufr)),
     count_map,
     hpx29,
     Some(params),
